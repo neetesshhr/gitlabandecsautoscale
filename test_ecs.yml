@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create an ECS service with autoscaling and a Task Execution Role
+
+Parameters:
+  ClusterNameECS:
+    Type: String
+    Default: NODE14
+    Description: Name of the ECS cluster where the service will be created
+
+Resources:
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterNameECS
+
+  TaskExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: node-execution-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ecs-tasks.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+
+  TaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: my-ecs-task
+        NetworkMode: awsvpc
+        ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+        RequiresCompatibilities:
+          - FARGATE
+        ContainerDefinitions:
+          - Name: my-container
+            Image: 769796820311.dkr.ecr.ap-south-1.amazonaws.com/ci-coordinator:latest
+            PortMappings:
+              - ContainerPort: 80
+            Memory: 1024 
+            Cpu: 512 
+
+  ECSAutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - application-autoscaling.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole"
+
+  ECSServiceAutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 4
+      MinCapacity: 1
+      ResourceId: !Sub "service/${ClusterNameECS}/my-ecs-service"
+      RoleARN: !GetAtt ECSAutoScalingRole.Arn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  ECSAutoScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: my-scaling-policy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ECSServiceAutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 70  # Adjust as needed
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleInCooldown: 60
+        ScaleOutCooldown: 60
+
+  ECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ECSCluster
+      ServiceName: my-ecs-service
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: EC2
+      DeploymentController:
+        Type: ECS
+      DesiredCount: 1  # This can be managed by auto scaling
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+
+Outputs:
+  ECSAutoScalingRoleArn:
+    Description: "IAM Role ARN for ECS Auto Scaling"
+    Value: !GetAtt ECSAutoScalingRole.Arn

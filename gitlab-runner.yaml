@@ -1,0 +1,505 @@
+---
+AWSTemplateFormatVersion: !!str 2010-09-09
+Description: GitLab Shell & Docker Runner Autoscale Groups
+
+# ---- Dependencies ----
+# stack: continuous-delivery-helper
+# stack: infrastructure
+# stack: iam-myacct/svc-roles
+# ---- Instructions ----
+
+Parameters:
+  # ---- Continuous Delivery ----
+  ContinuousDeliveryBucket:
+    Type: String
+    Default: passportlabs-mgmt-continuous-delivery
+  ContinuousDeliveryPrefix:
+    Type: String
+    Default: gitlab-runner
+    AllowedValues:
+      - gitlab-runner
+  BranchName:
+    Type: String
+    Default: master
+  # ---- Dependencies ----
+  MgmtAccountId:
+    Type: String
+    Default: '549672058480'
+    AllowedValues:
+      - '549672058480'
+  InfrastructureStackName:
+    Type: String
+    Default: infrastructure
+  # ---- EC2 Related Parameters ----
+  InstanceTypeAndroid:
+    Type: String
+    Default: m6a.large
+    Description: EC2 instance type
+    ConstraintDescription: Must be a valid EC2 instance type
+  InstanceTypeDocker:
+    Type: String
+    Default: m6a.large
+    Description: EC2 instance type
+    ConstraintDescription: Must be a valid EC2 instance type
+  RootVolumeSize:
+    Type: Number
+    Default: '512'
+    Description: Root volume size
+    MaxValue: '1000'
+  # ---- AutoScale Related Parameters ----
+  AndroidDesiredCapacity:
+    Type: String
+    Default: 2
+  AndroidMinSize:
+    Type: String
+    Default: 2
+  AndroidMaxSize:
+    Type: String
+    Default: 4
+  DockerDesiredCapacity:
+    Type: String
+    Default: 2
+  DockerMinSize:
+    Type: String
+    Default: 1
+  DockerMaxSize:
+    Type: String
+    Default: 4
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Continuous Delivery
+        Parameters:
+          - ContinuousDeliveryBucket
+          - ContinuousDeliveryPrefix
+          - BranchName
+      - Label:
+          default: Dependencies
+        Parameters:
+          - MgmtAccountId
+          - InfrastructureStackName
+      - Label:
+          default: EC2 Related Parameters
+        Parameters:
+          - RootVolumeSize
+          - InstanceTypeAndroid
+          - InstanceTypeDocker
+      - Label:
+          default: AutoScale Related Parameters
+        Parameters:
+          - AndroidDesiredCapacity
+          - AndroidMinSize
+          - AndroidMaxSize
+          - DockerDesiredCapacity
+          - DockerMinSize
+          - DockerMaxSize
+
+Mappings:
+  AccountParameterMap:
+    # used to lookup env/stage names by AWS::AccountId
+    AccountAlias:
+      "549672058480": "passportlabs-mgmt"
+      "257648066641": "passportlabs-dev"
+    Environment:
+      "549672058480": "mgmt"     # passportlabs-mgmt
+      "257648066641": "dev"      # passportlabs-dev
+    InstanceProfile:
+      # passportlabs-mgmt
+      "549672058480": "iam-myacct-SvcRoles-YH2Z304BRENO-GitLabRunnerInstanceProfile-1K1GBWUQ1OLM7"
+      # passportlabs-dev
+      "257648066641": "iam-common-SvcRoles-8XUFZWNRTV0F-GenericEC2InstanceProfile-DV8OWBLFI57Y"
+
+  RunnerAmiMap:
+    android:
+      # passportlabs-mgmt
+      "549672058480": "ami-0b156a93658f480e7"
+      # passportlabs-dev
+      "257648066641": "ami-0b156a93658f480e7"
+    docker:
+      # passportlabs-mgmt
+      "549672058480": "ami-0b156a93658f480e7"
+      # passportlabs-dev
+      "257648066641": "ami-0b156a93658f480e7"
+
+# ---- Conditions ----
+Conditions:
+  # CloudFormation is region specific; IAM is account specific.
+  # Only run this stack in us-east-1 to avoid IAM duplicates.
+  IsMgmtAcct: !Equals [ !Ref "AWS::AccountId", !Ref MgmtAccountId ]
+
+# ---- Resoures ----
+Resources:
+  # ---- Get outputs from the infrastructure stack ----
+  InfrastructureStackInfo:
+    Type: Custom::InfrastructureStackInfo
+    Properties:
+      ServiceToken: !ImportValue LookupStackOutputsArn
+      StackName: !Ref InfrastructureStackName
+
+  # ---- GitLab-Runner Distributed S3 Cache ----
+  GitLabRunnerCacheS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Join
+        - "-"
+        - - !FindInMap [AccountParameterMap, "AccountAlias", !Ref "AWS::AccountId"]
+          - !Ref ContinuousDeliveryPrefix
+          - !Ref "AWS::Region"
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Suspended
+
+  # ---- GitLab-Runner Container Registry ----
+  GitLabRunnerECR:
+    Type: "AWS::ECR::Repository"
+    Condition: IsMgmtAcct
+    Properties:
+      RepositoryName: gitlab-runner
+      LifecyclePolicy:
+        LifecyclePolicyText: >
+          {
+            "rules": [
+              {
+                "rulePriority": 10,
+                "description": "Expire untagged images older than 35 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 35
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+  
+  # ---- GitLab-Runner Security Group ----
+  GitLabRunnerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: gitlab-runner
+      VpcId: !GetAtt InfrastructureStackInfo.VpcId
+      Tags:
+        - Key: Name
+          Value: gitlab-runner
+
+  # ---- GitLab Docker Runner Focal AutoScaling::LaunchConfiguration
+  GitLabDockerRunnerFocalLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    Properties:
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            VolumeSize: !Ref RootVolumeSize
+            VolumeType: gp3
+      IamInstanceProfile: !FindInMap [AccountParameterMap, "InstanceProfile", !Ref "AWS::AccountId"]
+      ImageId: !FindInMap [RunnerAmiMap, "docker", !Ref "AWS::AccountId"]
+      InstanceMonitoring: true
+      InstanceType: !Ref InstanceTypeDocker
+      KeyName: !Join
+        - '-'
+        - - "passportlabs"
+          - !FindInMap [AccountParameterMap, Environment, !Ref "AWS::AccountId"]
+          - "default"
+      SecurityGroups:
+        - !GetAtt InfrastructureStackInfo.RemoteAccessSG
+        - !Ref GitLabRunnerSG
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+            - "\n"
+            - - "#!/bin/bash -x"
+              - "cd /tmp"
+              # basic OS bootstrap
+              - "export DEBIAN_FRONTEND=noninteractive"
+              - "apt-get -y update"
+              - "apt-get -y dist-upgrade"
+              - "apt-get -y install curl dos2unix pipx python3-venv unzip"
+              - "curl https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o awscliv2.zip"
+              - "unzip awscliv2.zip"
+              - "./aws/install"
+              - "pipx install ansible --include-deps"
+              - "pipx inject ansible boto3"
+              - "export PATH=${PATH}:/root/.local/bin"
+              # ansible-baseline
+              - "export ansible_baseline_tmp=$(mktemp -t -d ansible-baseline.XXXXXX)"
+              - !Sub "aws s3 sync s3://${ContinuousDeliveryBucket}/ansible-baseline/master/ ${!ansible_baseline_tmp}"
+              - "for i in $(find ${ansible_baseline_tmp} -type f); do dos2unix $i; done >/dev/null 2>&1"
+              - "cd ${ansible_baseline_tmp}/ansible"
+              - "ansible-playbook -i inventory/localhost.inv baseline.yml"
+              - "ansible-playbook -i inventory/localhost.inv datadog.yml"
+              # gitlab-runner
+              - "export gitlab_runner_tmp=$(mktemp -t -d gitlab-runner.XXXXXX)"
+              - !Sub "aws s3 sync s3://${ContinuousDeliveryBucket}/${ContinuousDeliveryPrefix}/${BranchName}/ ${!gitlab_runner_tmp}"
+              - "for i in $(find ${gitlab_runner_tmp} -type f); do dos2unix $i; done >/dev/null 2>&1"
+              - "cd ${gitlab_runner_tmp}/ansible"
+              - "bash gitlab-runner.sh docker local"
+              - "apt -y autoremove"
+              - "reboot"
+
+  GitLabDockerRunnerFocalLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: gitlab-runner-docker
+      VersionDescription: gitlab-runner-docker
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              DeleteOnTermination: true
+              VolumeSize: !Ref RootVolumeSize
+              VolumeType: gp3
+        EbsOptimized: true
+        IamInstanceProfile:
+          Name: !FindInMap [AccountParameterMap, "InstanceProfile", !Ref "AWS::AccountId"]
+        ImageId: !FindInMap [RunnerAmiMap, "docker", !Ref "AWS::AccountId"]
+        Monitoring:
+          Enabled: true
+        InstanceType: !Ref InstanceTypeDocker
+        KeyName: !Join
+          - '-'
+          - - "passportlabs"
+            - !FindInMap [AccountParameterMap, Environment, !Ref "AWS::AccountId"]
+            - "default"
+        SecurityGroupIds:
+          - !GetAtt InfrastructureStackInfo.RemoteAccessSG
+          - !Ref GitLabRunnerSG
+        UserData:
+          Fn::Base64:
+            Fn::Join:
+              - "\n"
+              - - "#!/bin/bash -x"
+                - "cd /tmp"
+                # basic OS bootstrap
+                - "export DEBIAN_FRONTEND=noninteractive"
+                - "apt-get -y update"
+                - "apt-get -y dist-upgrade"
+                - "apt-get -y install curl dos2unix pipx python3-venv unzip"
+                - "curl https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o awscliv2.zip"
+                - "unzip awscliv2.zip"
+                - "./aws/install"
+                - "pipx install ansible --include-deps"
+                - "pipx inject ansible boto3"
+                - "export PATH=${PATH}:/root/.local/bin"
+                # ansible-baseline
+                - "export ansible_baseline_tmp=$(mktemp -t -d ansible-baseline.XXXXXX)"
+                - !Sub "aws s3 sync s3://${ContinuousDeliveryBucket}/ansible-baseline/master/ ${!ansible_baseline_tmp}"
+                - "for i in $(find ${ansible_baseline_tmp} -type f); do dos2unix $i; done >/dev/null 2>&1"
+                - "cd ${ansible_baseline_tmp}/ansible"
+                - "ansible-playbook -i inventory/localhost.inv baseline.yml"
+                - "ansible-playbook -i inventory/localhost.inv datadog.yml"
+                # gitlab-runner
+                - "export gitlab_runner_tmp=$(mktemp -t -d gitlab-runner.XXXXXX)"
+                - !Sub "aws s3 sync s3://${ContinuousDeliveryBucket}/${ContinuousDeliveryPrefix}/${BranchName}/ ${!gitlab_runner_tmp}"
+                - "for i in $(find ${gitlab_runner_tmp} -type f); do dos2unix $i; done >/dev/null 2>&1"
+                - "cd ${gitlab_runner_tmp}/ansible"
+                - "bash gitlab-runner.sh docker local"
+                - "apt -y autoremove"
+                - "reboot"
+
+  GitLabDockerRunnerFocalASG0:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref GitLabDockerRunnerFocalLaunchTemplate
+        Version: !GetAtt GitLabDockerRunnerFocalLaunchTemplate.LatestVersionNumber
+      DesiredCapacity: !Ref DockerDesiredCapacity
+      MaxSize: !Ref DockerMaxSize
+      MinSize: !Ref DockerMinSize
+      TerminationPolicies:
+        - OldestInstance
+      VPCZoneIdentifier:
+        - !GetAtt InfrastructureStackInfo.PrivateSubnet1
+        - !GetAtt InfrastructureStackInfo.PrivateSubnet2
+        - !GetAtt InfrastructureStackInfo.PrivateSubnet3
+      Tags:
+        - Key: Name
+          Value: gitlab-runner-docker
+          PropagateAtLaunch: true
+        - Key: passport.product
+          Value: devops
+          PropagateAtLaunch: true
+        - Key: passport.service
+          Value: devops-gitlab-runner
+          PropagateAtLaunch: true
+        - Key: passport.ec2.user
+          Value: ubuntu
+          PropagateAtLaunch: true
+        - Key: passport.ec2.os-version
+          Value: ubuntu-20.04
+          PropagateAtLaunch: true
+        - Key: aws_backup_group
+          Value: disabled
+          PropagateAtLaunch: true
+
+  # ---- GitLab Android Runner Focal AutoScaling::LaunchConfiguration
+  GitLabAndroidRunnerFocalLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    Properties:
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            DeleteOnTermination: true
+            VolumeSize: !Ref RootVolumeSize
+            VolumeType: gp3
+      IamInstanceProfile: !FindInMap [AccountParameterMap, "InstanceProfile", !Ref "AWS::AccountId"]
+      ImageId: !FindInMap [RunnerAmiMap, "android", !Ref "AWS::AccountId"]
+      InstanceMonitoring: true
+      InstanceType: !Ref InstanceTypeAndroid
+      KeyName: !Join
+        - '-'
+        - - "passportlabs"
+          - !FindInMap [AccountParameterMap, Environment, !Ref "AWS::AccountId"]
+          - "default"
+      SecurityGroups:
+        - !GetAtt InfrastructureStackInfo.RemoteAccessSG
+        - !Ref GitLabRunnerSG
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+            - "\n"
+            - - "#!/bin/bash -x"
+              - "cd /tmp"
+              # basic OS bootstrap
+              - "export DEBIAN_FRONTEND=noninteractive"
+              - "apt-get -y update"
+              - "apt-get -y dist-upgrade"
+              - "apt-get -y install curl dos2unix pipx python3-venv unzip"
+              - "curl https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o awscliv2.zip"
+              - "unzip awscliv2.zip"
+              - "./aws/install"
+              - "pipx install ansible --include-deps"
+              - "pipx inject ansible boto3"
+              - "export PATH=${PATH}:/root/.local/bin"
+              # ansible-baseline
+              - "export ansible_baseline_tmp=$(mktemp -t -d ansible-baseline.XXXXXX)"
+              - !Sub "aws s3 sync s3://${ContinuousDeliveryBucket}/ansible-baseline/master/ ${!ansible_baseline_tmp}"
+              - "for i in $(find ${ansible_baseline_tmp} -type f); do dos2unix $i; done >/dev/null 2>&1"
+              - "cd ${ansible_baseline_tmp}/ansible"
+              - "ansible-playbook -i inventory/localhost.inv baseline.yml"
+              - "ansible-playbook -i inventory/localhost.inv datadog.yml"
+              # gitlab-runner
+              - "export gitlab_runner_tmp=$(mktemp -t -d gitlab-runner.XXXXXX)"
+              - !Sub "aws s3 sync s3://${ContinuousDeliveryBucket}/${ContinuousDeliveryPrefix}/${BranchName}/ ${!gitlab_runner_tmp}"
+              - "for i in $(find ${gitlab_runner_tmp} -type f); do dos2unix $i; done >/dev/null 2>&1"
+              - "cd ${gitlab_runner_tmp}/ansible"
+              - "bash gitlab-runner.sh android local"
+              - "apt -y autoremove"
+              - "reboot"
+
+  GitLabAndroidRunnerFocalLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: gitlab-runner-android
+      VersionDescription: gitlab-runner-android
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              DeleteOnTermination: true
+              VolumeSize: !Ref RootVolumeSize
+              VolumeType: gp3
+        EbsOptimized: true
+        IamInstanceProfile:
+          Name: !FindInMap [AccountParameterMap, "InstanceProfile", !Ref "AWS::AccountId"]
+        ImageId: !FindInMap [RunnerAmiMap, "android", !Ref "AWS::AccountId"]
+        Monitoring:
+          Enabled: true
+        InstanceType: !Ref InstanceTypeAndroid
+        KeyName: !Join
+          - '-'
+          - - "passportlabs"
+            - !FindInMap [AccountParameterMap, Environment, !Ref "AWS::AccountId"]
+            - "default"
+        SecurityGroupIds:
+          - !GetAtt InfrastructureStackInfo.RemoteAccessSG
+          - !Ref GitLabRunnerSG
+        UserData:
+          Fn::Base64:
+            Fn::Join:
+              - "\n"
+              - - "#!/bin/bash -x"
+                - "cd /tmp"
+                # basic OS bootstrap
+                - "export DEBIAN_FRONTEND=noninteractive"
+                - "apt-get -y update"
+                - "apt-get -y dist-upgrade"
+                - "apt-get -y install curl dos2unix pipx python3-venv unzip"
+                - "curl https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o awscliv2.zip"
+                - "unzip awscliv2.zip"
+                - "./aws/install"
+                - "pipx install ansible --include-deps"
+                - "pipx inject ansible boto3"
+                - "export PATH=${PATH}:/root/.local/bin"
+                # ansible-baseline
+                - "export ansible_baseline_tmp=$(mktemp -t -d ansible-baseline.XXXXXX)"
+                - !Sub "aws s3 sync s3://${ContinuousDeliveryBucket}/ansible-baseline/master/ ${!ansible_baseline_tmp}"
+                - "for i in $(find ${ansible_baseline_tmp} -type f); do dos2unix $i; done >/dev/null 2>&1"
+                - "cd ${ansible_baseline_tmp}/ansible"
+                - "ansible-playbook -i inventory/localhost.inv baseline.yml"
+                - "ansible-playbook -i inventory/localhost.inv datadog.yml"
+                # gitlab-runner
+                - "export gitlab_runner_tmp=$(mktemp -t -d gitlab-runner.XXXXXX)"
+                - !Sub "aws s3 sync s3://${ContinuousDeliveryBucket}/${ContinuousDeliveryPrefix}/${BranchName}/ ${!gitlab_runner_tmp}"
+                - "for i in $(find ${gitlab_runner_tmp} -type f); do dos2unix $i; done >/dev/null 2>&1"
+                - "cd ${gitlab_runner_tmp}/ansible"
+                - "bash gitlab-runner.sh android local"
+                - "apt -y autoremove"
+                - "reboot"
+
+  GitLabAndroidRunnerFocalASG0:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref GitLabAndroidRunnerFocalLaunchTemplate
+        Version: !GetAtt GitLabAndroidRunnerFocalLaunchTemplate.LatestVersionNumber
+      DesiredCapacity: !Ref AndroidDesiredCapacity
+      MaxSize: !Ref AndroidMaxSize
+      MinSize: !Ref AndroidMinSize
+      TerminationPolicies:
+        - OldestInstance
+      VPCZoneIdentifier:
+        - !GetAtt InfrastructureStackInfo.PrivateSubnet1
+        - !GetAtt InfrastructureStackInfo.PrivateSubnet2
+        - !GetAtt InfrastructureStackInfo.PrivateSubnet3
+      Tags:
+        - Key: Name
+          Value: gitlab-runner-android
+          PropagateAtLaunch: true
+        - Key: passport.product
+          Value: devops
+          PropagateAtLaunch: true
+        - Key: passport.service
+          Value: devops-gitlab-runner
+          PropagateAtLaunch: true
+        - Key: passport.ec2.user
+          Value: ubuntu
+          PropagateAtLaunch: true
+        - Key: passport.ec2.os-version
+          Value: ubuntu-20.04
+          PropagateAtLaunch: true
+        - Key: aws_backup_group
+          Value: disabled
+          PropagateAtLaunch: true

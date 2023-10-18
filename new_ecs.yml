@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ECS Service with Auto Scaling
+
+
+
+Resources:
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: MyEcsCluster
+
+  ECSExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: MyECSTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      # Attach policies or specify other permissions as needed
+
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: my-ecs-task
+      NetworkMode: awsvpc
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt ECSExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: node-14
+          Image: 769796820311.dkr.ecr.ap-south-1.amazonaws.com/ci-coordinator:latest
+          Essential: true
+          PortMappings:
+            - ContainerPort: 80
+
+  ECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ECSCluster
+      DesiredCount: 2
+      LaunchType: EC2
+      TaskDefinition: !Ref ECSTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !ImportValue DefaultVPC-SubnetIds # Import default VPC subnet IDs
+          SecurityGroups: 
+            - !Fn::Sub |
+                - aws ec2 describe-security-groups --filters "Name=vpc-id,Values=${DefaultVPCId}" "Name=group-name,Values=default" --query "SecurityGroups[0].GroupId" --output text
+                - DefaultVPCId: !ImportValue DefaultVPC-Id
+      PlacementStrategies:
+        - Field: cpu
+          Type: binpack
+      PlacementConstraints:
+        - Type: distinctInstance
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+
+  ECSCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !GetAtt ECSService.AutoScalingGroup
+        ManagedScaling:
+          Status: ENABLED
+          TargetCapacity: 60
+        ManagedTerminationProtection: DISABLED
+      Name: my-capacity-provider
+      Tags:
+        - Key: Name
+          Value: MyCapacityProvider
+
+  ECSServiceAutoScalingTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 4
+      MinCapacity: 1
+      ResourceId: !Sub "service/MyEcsCluster/${ECSService}"
+      RoleARN: !GetAtt ECSAutoScalingRole.Arn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  ECSAutoScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: ECSAutoScalingPolicy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ECSServiceAutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        ScaleOutCooldown: 60
+        ScaleInCooldown: 60
+
+  ECSAutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - application-autoscaling.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole
+
+Outputs:
+  ECSAutoScalingRoleArn:
+    Description: "IAM Role ARN for ECS Auto Scaling"
+    Value: !GetAtt ECSAutoScalingRole.Arn

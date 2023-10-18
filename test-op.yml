@@ -1,0 +1,35 @@
+Resources:
+  MyIAMPolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "MyECSCloudWatchPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "ecs:DescribeServices"
+              - "ecs:UpdateService"
+              - "cloudwatch:PutMetricAlarm"
+              - "cloudwatch:DescribeAlarms"
+              - "cloudwatch:DeleteAlarms"
+            Resource: "*"
+      Roles:
+        - Ref: MyIAMRole
+
+  MyIAMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "MyECSRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "ecs-tasks.amazonaws.com"
+            Action: "sts:AssumeRole"
+
+Outputs:
+  IAMRoleName:
+    Description: "IAM Role Name"
+    Value: !Ref MyIAMRole

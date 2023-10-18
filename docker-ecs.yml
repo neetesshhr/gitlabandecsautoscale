@@ -1,0 +1,771 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'Cache'
+        Parameters: ['CacheBucketName', 'CacheExpirationInDays']
+      - Label:
+          default: 'EC2'
+        Parameters: ['VpcId', 'SubnetId', 'ManagerImageId', 'ManagerInstanceType', 'ManagerKeyPair', 'GitlabRunnerInstanceType']
+      - Label:
+          default: 'GitLab'
+        Parameters: ['GitlabUrl', 'GitlabToken']
+      - Label:
+          default: 'Runner'
+        Parameters: ['GitLabRunnerSpotInstance', 'GitLabRunnerSpotInstancePrice', GitlabDockerImage', GitlabMaxBuilds', GitlabMaxConcurrentBuilds', 'GitlabIdleCount', 'GitlabIdleTime', 'GitlabOffPeakIdleCount', 'GitlabOffPeakIdleTime', 'GitlabOffPeakTimezone', 'GitlabCheckInterval']
+
+Parameters:
+  CacheBucketName:
+    Type: 'String'
+    Description: |
+      Name of the S3 bucket to be created to store runners cache. Leave empty to autogenerate a name.
+    Default: ''
+  # Need to build Dockerfile in fargate directory to use here as DockerImageDefault
+  DockerImageDefault:
+    Type: String
+    Description: The default Docker Image, when no image is specified on .gitlab-ci.yml
+    Default: 'alpine:latest'
+  RunnerDesiredCapacityEC2:
+    Type: 'Number'
+    Description: Runner desired Capacity
+    Default: 1
+  CPU:
+    Type: Number
+    Description: Set the number of CPUs for the spawner (1 CPU = 1024)
+    Default: '512'
+  Memory:
+    Type: Number
+    Description: Set the amount of RAM in KB for the spawner
+    Default: '1024'
+  CacheExpirationInDays:
+    Type: 'Number'
+    Description: |
+      Number of days after which a cache item is expired. Set to 0 to disable expiration.
+    MinValue: 0
+    Default: 30
+  ManagerImageId:
+    Type: 'AWS::EC2::Image::Id'
+    Description: |
+      AMI for GitLab Runner's manager instance.
+    
+  ManagerInstanceType:
+    Type: 'String'
+    Description: |
+      Instance type for GitLab Runners' manager.
+    AllowedValues: [
+      'c1.medium', 'c1.xlarge',
+      'c3.large', 'c3.xlarge', 'c3.2xlarge', 'c3.4xlarge', 'c3.8xlarge',
+      'c4.large', 'c4.xlarge', 'c4.2xlarge', 'c4.4xlarge', 'c4.8xlarge',
+      'c5.large', 'c5.xlarge', 'c5.2xlarge', 'c5.4xlarge', 'c5.9xlarge', 'c5.18xlarge',
+      'c5d.large', 'c5d.xlarge', 'c5d.2xlarge', 'c5d.4xlarge', 'c5d.9xlarge', 'c5d.18xlarge',
+      'cc2.8xlarge',
+      'cr1.8xlarge',
+      'd2.xlarge', 'd2.2xlarge', 'd2.4xlarge', 'd2.8xlarge',
+      'f1.2xlarge', 'f1.4xlarge', 'f1.16xlarge',
+      'g2.2xlarge', 'g2.8xlarge',
+      'g3.4xlarge', 'g3.8xlarge', 'g3.16xlarge',
+      'g3s.xlarge',
+      'h1.2xlarge', 'h1.4xlarge', 'h1.8xlarge', 'h1.16xlarge',
+      'hs1.8xlarge',
+      'i2.xlarge', 'i2.2xlarge', 'i2.4xlarge', 'i2.8xlarge',
+      'i3.large', 'i3.xlarge', 'i3.2xlarge', 'i3.4xlarge', 'i3.8xlarge', 'i3.16xlarge', 'i3.metal',
+      'm1.small', 'm1.medium', 'm1.large', 'm1.xlarge',
+      'm2.xlarge', 'm2.2xlarge', 'm2.4xlarge',
+      'm3.medium', 'm3.large', 'm3.xlarge', 'm3.2xlarge',
+      'm4.large', 'm4.xlarge', 'm4.2xlarge', 'm4.4xlarge', 'm4.10xlarge', 'm4.16xlarge',
+      'm5.large', 'm5.xlarge', 'm5.2xlarge', 'm5.4xlarge', 'm5.12xlarge', 'm5.24xlarge',
+      'm5d.large', 'm5d.xlarge', 'm5d.2xlarge', 'm5d.4xlarge', 'm5d.12xlarge', 'm5d.24xlarge',
+      'p2.xlarge', 'p2.8xlarge', 'p2.16xlarge',
+      'p3.2xlarge', 'p3.8xlarge', 'p3.16xlarge',
+      'r3.large', 'r3.xlarge', 'r3.2xlarge', 'r3.4xlarge', 'r3.8xlarge',
+      'r4.large', 'r4.xlarge', 'r4.2xlarge', 'r4.4xlarge', 'r4.8xlarge', 'r4.16xlarge',
+      'r5.large', 'r5.xlarge', 'r5.2xlarge', 'r5.4xlarge', 'r5.12xlarge', 'r5.24xlarge',
+      'r5d.large', 'r5d.xlarge', 'r5d.2xlarge', 'r5d.4xlarge', 'r5d.12xlarge', 'r5d.24xlarge',
+      't1.micro',
+      't2.nano', 't2.micro', 't2.small', 't2.medium', 't2.large', 't2.xlarge', 't2.2xlarge',
+      't3.nano', 't3.micro', 't3.small', 't3.medium', 't3.large', 't3.xlarge', 't3.2xlarge',
+      'x1.16xlarge', 'x1.32xlarge',
+      'x1e.xlarge', 'x1e.2xlarge', 'x1e.4xlarge', 'x1e.8xlarge', 'x1e.16xlarge', 'x1e.32xlarge',
+      'z1d.large', 'z1d.xlarge', 'z1d.2xlarge', 'z1d.3xlarge', 'z1d.6xlarge', 'z1d.12xlarge',
+    ]
+    Default: 't3.nano'
+    ## choose key pair to run the gitlab ec2 gitlab-runner-dev
+  ManagerKeyPair:
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    Description: |
+      Key pair that is authorized to access GitLab Runner's manager instance via SSH.
+    
+  GitlabUrl:
+    Type: 'String'
+    Description: |
+      GitLab instance URL.
+    Default: 'https://gitlab.com/'  ## change the gitlab url
+  GitlabToken:    ## put the token from the aws secret manager
+    Type: 'String'
+    Description: |
+      GitLab Runner token.
+    NoEcho: true
+    
+  GitlabRunnerInstanceType:
+    Type: 'String'
+    Description: |
+      Instance type for GitLab Runners.
+    AllowedValues: [
+      'c1.medium', 'c1.xlarge',
+      'c3.large', 'c3.xlarge', 'c3.2xlarge', 'c3.4xlarge', 'c3.8xlarge',
+      'c4.large', 'c4.xlarge', 'c4.2xlarge', 'c4.4xlarge', 'c4.8xlarge',
+      'c5.large', 'c5.xlarge', 'c5.2xlarge', 'c5.4xlarge', 'c5.9xlarge', 'c5.18xlarge',
+      'c5d.large', 'c5d.xlarge', 'c5d.2xlarge', 'c5d.4xlarge', 'c5d.9xlarge', 'c5d.18xlarge',
+      'cc2.8xlarge',
+      'cr1.8xlarge',
+      'd2.xlarge', 'd2.2xlarge', 'd2.4xlarge', 'd2.8xlarge',
+      'f1.2xlarge', 'f1.4xlarge', 'f1.16xlarge',
+      'g2.2xlarge', 'g2.8xlarge',
+      'g3.4xlarge', 'g3.8xlarge', 'g3.16xlarge',
+      'g3s.xlarge',
+      'h1.2xlarge', 'h1.4xlarge', 'h1.8xlarge', 'h1.16xlarge',
+      'hs1.8xlarge',
+      'i2.xlarge', 'i2.2xlarge', 'i2.4xlarge', 'i2.8xlarge',
+      'i3.large', 'i3.xlarge', 'i3.2xlarge', 'i3.4xlarge', 'i3.8xlarge', 'i3.16xlarge', 'i3.metal',
+      'm1.small', 'm1.medium', 'm1.large', 'm1.xlarge',
+      'm2.xlarge', 'm2.2xlarge', 'm2.4xlarge',
+      'm3.medium', 'm3.large', 'm3.xlarge', 'm3.2xlarge',
+      'm4.large', 'm4.xlarge', 'm4.2xlarge', 'm4.4xlarge', 'm4.10xlarge', 'm4.16xlarge',
+      'm5.large', 'm5.xlarge', 'm5.2xlarge', 'm5.4xlarge', 'm5.12xlarge', 'm5.24xlarge',
+      'm5d.large', 'm5d.xlarge', 'm5d.2xlarge', 'm5d.4xlarge', 'm5d.12xlarge', 'm5d.24xlarge',
+      'p2.xlarge', 'p2.8xlarge', 'p2.16xlarge',
+      'p3.2xlarge', 'p3.8xlarge', 'p3.16xlarge',
+      'r3.large', 'r3.xlarge', 'r3.2xlarge', 'r3.4xlarge', 'r3.8xlarge',
+      'r4.large', 'r4.xlarge', 'r4.2xlarge', 'r4.4xlarge', 'r4.8xlarge', 'r4.16xlarge',
+      'r5.large', 'r5.xlarge', 'r5.2xlarge', 'r5.4xlarge', 'r5.12xlarge', 'r5.24xlarge',
+      'r5d.large', 'r5d.xlarge', 'r5d.2xlarge', 'r5d.4xlarge', 'r5d.12xlarge', 'r5d.24xlarge',
+      't1.micro',
+      't2.nano', 't2.micro', 't2.small', 't2.medium', 't2.large', 't2.xlarge', 't2.2xlarge',
+      't3.nano', 't3.micro', 't3.small', 't3.medium', 't3.large', 't3.xlarge', 't3.2xlarge',
+      'x1.16xlarge', 'x1.32xlarge',
+      'x1e.xlarge', 'x1e.2xlarge', 'x1e.4xlarge', 'x1e.8xlarge', 'x1e.16xlarge', 'x1e.32xlarge',
+      'z1d.large', 'z1d.xlarge', 'z1d.2xlarge', 'z1d.3xlarge', 'z1d.6xlarge', 'z1d.12xlarge',
+    ]
+    Default: 't2.micro'
+  GitlabDockerImage:
+    Type: 'String'
+    Description: |
+      Name of the Docker image to be used.
+    Default: 'alpine:latest'
+  GitlabMaxBuilds:
+    Type: 'Number'
+    Description: |
+      Maximum number of builds before the runner is terminated.
+    MinValue: 1
+    Default: 10
+  GitlabMaxConcurrentBuilds:
+    Type: 'Number'
+    Description: |
+      Maximum number of concurrent builds during working hours.
+    MinValue: 1
+    Default: 10
+  GitlabIdleCount:
+    Type: 'Number'
+    Description: |
+      Number of idle hosts during working hours.
+    MinValue: 0
+    Default: 1
+  GitlabIdleTime:
+    Type: 'Number'
+    Description: |
+      Number of seconds of inactivity before an idle host is shut down during working hours.
+    MinValue: 1
+    Default: 1800
+  GitlabOffPeakTimezone:
+    Type: 'String'
+    Description: |
+      Timezone in which non-working hours are evaluated.
+    AllowedValues: [
+      'Africa/Algiers', 'Africa/Cairo', 'Africa/Casablanca', 'Africa/Harare', 'Africa/Johannesburg', 'Africa/Monrovia', 'Africa/Nairobi',
+      'America/Argentina/Buenos_Aires', 'America/Bogota', 'America/Caracas', 'America/Chicago', 'America/Chihuahua', 'America/Denver', 'America/Godthab', 'America/Guatemala', 'America/Guyana', 'America/Halifax', 'America/Indiana/Indianapolis', 'America/Juneau', 'America/La_Paz', 'America/Lima', 'America/Los_Angeles', 'America/Mazatlan', 'America/Mexico_City', 'America/Monterrey', 'America/Montevideo', 'America/New_York', 'America/Phoenix', 'America/Regina', 'America/Santiago', 'America/Sao_Paulo', 'America/St_Johns', 'America/Tijuana',
+      'Asia/Almaty', 'Asia/Baghdad', 'Asia/Baku', 'Asia/Bangkok', 'Asia/Chongqing', 'Asia/Colombo', 'Asia/Dhaka', 'Asia/Hong_Kong', 'Asia/Irkutsk', 'Asia/Jakarta', 'Asia/Jerusalem', 'Asia/Kabul', 'Asia/Kamchatka', 'Asia/Karachi', 'Asia/Kathmandu', 'Asia/Kolkata', 'Asia/Krasnoyarsk', 'Asia/Kuala_Lumpur', 'Asia/Kuwait', 'Asia/Magadan', 'Asia/Muscat', 'Asia/Novosibirsk', 'Asia/Rangoon', 'Asia/Riyadh', 'Asia/Seoul', 'Asia/Shanghai', 'Asia/Singapore', 'Asia/Taipei', 'Asia/Tashkent', 'Asia/Tbilisi', 'Asia/Tehran', 'Asia/Tokyo', 'Asia/Ulaanbaatar', 'Asia/Urumqi', 'Asia/Vladivostok', 'Asia/Yakutsk', 'Asia/Yekaterinburg', 'Asia/Yerevan',
+      'Atlantic/Azores', 'Atlantic/Cape_Verde', 'Atlantic/South_Georgia',
+      'Australia/Adelaide', 'Australia/Brisbane', 'Australia/Darwin', 'Australia/Hobart', 'Australia/Melbourne', 'Australia/Perth', 'Australia/Sydney',
+      'Etc/UTC',
+      'Europe/Amsterdam', 'Europe/Athens', 'Europe/Belgrade', 'Europe/Berlin', 'Europe/Bratislava', 'Europe/Brussels', 'Europe/Bucharest', 'Europe/Budapest', 'Europe/Copenhagen', 'Europe/Dublin', 'Europe/Helsinki', 'Europe/Istanbul', 'Europe/Kiev', 'Europe/Lisbon', 'Europe/Ljubljana', 'Europe/London', 'Europe/Madrid', 'Europe/Minsk', 'Europe/Moscow', 'Europe/Paris', 'Europe/Prague', 'Europe/Riga', 'Europe/Rome', 'Europe/Sarajevo', 'Europe/Skopje', 'Europe/Sofia', 'Europe/Stockholm', 'Europe/Tallinn', 'Europe/Vienna', 'Europe/Vilnius', 'Europe/Warsaw', 'Europe/Zagreb',
+      'Pacific/Apia', 'Pacific/Auckland', 'Pacific/Chatham', 'Pacific/Fakaofo', 'Pacific/Fiji', 'Pacific/Guadalcanal', 'Pacific/Guam', 'Pacific/Honolulu', 'Pacific/Majuro', 'Pacific/Midway', 'Pacific/Noumea', 'Pacific/Pago_Pago', 'Pacific/Port_Moresby', 'Pacific/Tongatapu',
+    ]
+    Default: 'Etc/UTC'
+  GitlabOffPeakIdleCount:
+    Type: 'Number'
+    Description: |
+      Number of idle hosts during non-working hours.
+    MinValue: 0
+    Default: 0
+  GitlabOffPeakIdleTime:
+    Type: 'Number'
+    Description: |
+      Number of seconds of inactivity before an idle host is shut down during non-working hours.
+    MinValue: 1
+    Default: 1200
+  GitlabCheckInterval:
+    Type: 'Number'
+    Description: |
+      Number of seconds how often the Runner should check GitLab for new jobs.
+    MinValue: 0
+    Default: 0
+  GitLabRunnerSpotInstance:
+    Type: 'String'
+    Description: |
+      Will runners be spot instances?
+    AllowedValues: ['Yes', 'No']
+    Default: 'No'
+  GitLabRunnerSpotInstancePrice:
+    Type: 'Number'
+    MinValue: 0
+    Description: |
+      Spot instance bid price.
+    Default: 0.08
+  InfrastructureStackName:
+    Type: String
+    Default: infrastructure
+
+Conditions:
+  GivenBucketName: !Not [!Equals ['', !Ref 'CacheBucketName']]
+  ExpireCacheObjects: !Not [!Equals [0, !Ref 'CacheExpirationInDays']]
+  UseSpotInstances: !Equals ['Yes', !Ref 'GitLabRunnerSpotInstance']
+
+Outputs:
+  CacheBucketName:
+    Description: |
+      Name of created S3 bucket.
+    Value: !Ref 'CacheBucket'
+  ManagerIP:
+    Description: |
+      IP of manager instance.
+    Value: !Ref 'ManagerEIP'
+
+Resources:
+  ####################################
+  ### Custom InfrastructureStackInfo  ###
+  ####################################
+  InfrastructureStackInfo:
+    Type: Custom::InfrastructureStackInfo
+    Properties:
+      ServiceToken: !ImportValue LookupStackOutputsArn
+      StackName: !Ref InfrastructureStackName
+    
+  ####################################
+  ### S3 Bucket for Runners' cache ###
+  ####################################
+  CacheBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !If
+        - 'GivenBucketName'
+        - !Ref 'CacheBucketName'
+        - !Ref 'AWS::NoValue'
+      LifecycleConfiguration: !If
+        - 'ExpireCacheObjects'
+        - Rules:
+            - Status: 'Enabled'
+              ExpirationInDays: !Ref 'CacheExpirationInDays'
+        - !Ref 'AWS::NoValue'
+
+
+    
+
+  #############################
+  ### GitLab Runner Manager ###
+  #############################
+  ManagerSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !GetAtt InfrastructureStackInfo.VpcId
+      GroupName: !Sub '${AWS::StackName}-ManagerSecurityGroup'
+      GroupDescription: 'Security group for GitLab Runners Manager.'
+      SecurityGroupIngress:
+        - Description: 'SSH traffic'
+          IpProtocol: 'tcp'
+          FromPort: 22
+          ToPort: 22
+          CidrIp: '0.0.0.0/0'  ## change it later from the console
+
+          ##############
+          # Create the ecr repo
+          ###############
+  FargateGitlabRunnerECR:
+    Type: "AWS::ECR::Repository"
+    
+    Properties:
+      RepositoryName: fargate-gitlab-runner
+      LifecyclePolicy:
+        LifecyclePolicyText: >
+          {
+            "rules": [
+              {
+                "rulePriority": 10,
+                "description": "Expire untagged images older than 35 days",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 35
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+    
+  ManagerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'ec2.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: Cache
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 's3:ListObjects*'
+                  - 's3:GetObject*'
+                  - 's3:DeleteObject*'
+                  - 's3:PutObject*'
+                Resource:
+                  - !Sub '${CacheBucket.Arn}/*'
+              - Effect: 'Allow'
+                Action:
+                  - 's3:ListBucket'
+                Resource:
+                  - !GetAtt 'CacheBucket.Arn'
+        - PolicyName: Runners
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'ec2:CreateKeyPair'
+                  - 'ec2:DeleteKeyPair'
+                  - 'ec2:ImportKeyPair'
+                  - 'ec2:Describe*'
+                Resource:
+                  - '*'
+              - Effect: 'Allow'
+                Action:
+                  - 'ec2:CreateTags'
+                  - 'ssm:UpdateInstanceInformation'
+                  - 'ec2:RunInstances'
+                  - 'ec2:RequestSpotInstances'
+                Resource:
+                  - '*'
+              - Effect: 'Allow'
+                Action:
+                  - 'ec2:TerminateInstances'
+                  - 'ec2:StopInstances'
+                  - 'ec2:StartInstances'
+                  - 'ec2:RebootInstances'
+                Resource:
+                  - '*'
+                Condition:
+                  ArnEquals:
+                    'ec2:InstanceProfile': !GetAtt 'RunnersInstanceProfile.Arn'
+              - Effect: 'Allow'
+                Action:
+                  - 'iam:PassRole'
+                Resource:
+                  - !GetAtt 'RunnersRole.Arn'
+  ManagerInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+        - !Ref 'ManagerRole'
+  Manager:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      ImageId: !Ref 'ManagerImageId'
+      InstanceType: !Ref 'ManagerInstanceType'
+      KeyName: !Ref 'ManagerKeyPair'
+      IamInstanceProfile: !Ref 'ManagerInstanceProfile'
+      SecurityGroupIds:
+        - !Ref 'ManagerSecurityGroup'
+      SubnetId: !GetAtt InfrastructureStackInfo.PrivateSubnet1
+      Tags:
+        - Key: 'Name'
+          Value: !Ref 'AWS::StackName'
+      UserData:
+        Fn::Base64: !Sub |
+          '#!/bin/bash -xe'
+          'apt-get update -y'
+          'apt-get install -y python-minimal  # Install Python (required for some AWS tools)'
+          'sudo mkdir -p /opt/gitlab-runner/{metadata,builds,cache}'
+          '# Install the files and packages from the metadata'
+          '/opt/aws/bin/cfn-init --stack '${AWS::StackName}' --region '${AWS::Region}' --resource Manager --configsets default'
+
+          '# Signal the status from cfn-init'
+          '/opt/aws/bin/cfn-signal -e $? --stack '${AWS::StackName}' --region '${AWS::Region}' --resource Manager'
+    Metadata:
+      'AWS::CloudFormation::Init':
+        configSets:
+          install:
+            - 'repositories'
+            - 'packages'
+          config:
+            - 'config'
+          default:
+            - ConfigSet: 'install'
+            - ConfigSet: 'config'
+        repositories:
+          commands:
+            '10-gitlab-runner':
+              command: 'curl -s "https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh" | sudo bash'
+        packages:
+          packages:
+            apt:
+              'docker': []
+              'gitlab-runner': []
+              'tzdata': []
+          files:
+            '/etc/cfn/cfn-hup.conf':
+              owner: 'root'
+              group: 'root'
+              mode: '000400'
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+            '/etc/cfn/hooks.d/cfn-auto-reloader.conf':
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.Manager.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --region ${AWS::Region} --resource Manager --configsets default
+                runas: root
+          commands:
+            10-docker-machine:
+              command: 'curl -L https://github.com/docker/machine/releases/download/v0.14.0/docker-machine-$(uname -s)-$(uname -m) > /tmp/docker-machine && sudo install /tmp/docker-machine /usr/local/bin/docker-machine'
+            20-gitlab-runner-start:
+              command: 'sudo gitlab-runner start'
+            30-gitlab-runner-register:
+              command: !Sub 'sudo gitlab-runner register --url ${GitlabUrl} --registration-token ${GitlabToken} --name fargate-test-runner --run-untagged --executor custom -n'
+            40-download-fargate-runner:
+              command: |
+                sudo curl -Lo /opt/gitlab-runner/fargate "https://gitlab-runner-custom-fargate-downloads.s3.amazonaws.com/latest/fargate-linux-amd64"
+                sudo chmod +x /opt/gitlab-runner/fargate"
+          services:
+            sysvinit:
+              'cfn-hup':
+                enabled: 'true'
+                ensureRunning: 'true'
+                files:
+                  - '/etc/cfn/cfn-hup.conf'
+                  - '/etc/cfn/hooks.d/cfn-auto-reloader.conf'
+              gitlab-runner:
+                enabled: 'true'
+                ensureRunning: 'true'
+                commands:
+                  - 10-docker-machine
+                  - 20-gitlab-runner-start
+                  - 30-gitlab-runner-register
+                  - 40-download-fargate-runner
+        config:
+          files:
+            '/etc/gitlab-runner/fargate.toml':
+              owner: 'gitlab-runner'
+              group: 'gitlab-runner'
+              mode: '000600'
+              content: 
+                Fn::Sub: |
+                  LogLevel = "info"
+                  LogFormat = "text"
+
+                  [Fargate]
+                  Cluster = "test-cluster"
+                  Region = "${AWS::Region}"
+                  Subnet = "${InfrastructureStackInfo.PrivateSubnet1}"
+                  SecurityGroup = "${RunnersSecurityGroup}"
+                  TaskDefinition = "test-task:1"
+                  EnablePublicIP = true
+
+                  [TaskMetadata]
+                  Directory = "/opt/gitlab-runner/metadata"
+
+                  [SSH]
+                  Username = "root"
+                  Port = 22
+            '/etc/gitlab-runner/config.toml':
+              owner: 'gitlab-runner'
+              group: 'gitlab-runner'
+              mode: '000600'
+              content:
+                Fn::Sub: |
+                  concurrent = ${GitlabMaxConcurrentBuilds}
+                  check_interval = ${GitlabCheckInterval}
+
+                  [[runners]]
+                  name = "${AWS::StackName}"
+                  url = "${GitlabUrl}"
+                  token = "${GitlabToken}"
+                  executor = "docker+machine"
+                  [runners.docker]
+                  tls_verify = false
+                  image = "${GitlabDockerImage}"
+                  privileged = true
+                  disable_cache = true
+                  volumes = ["/var/run/docker.sock:/var/run/docker.sock", "/cache"]
+                  shm_size = 0
+                  [runners.cache]
+                  Type = "s3"
+                  Shared = true
+                  [runners.cache.s3]
+                  ServerAddress = "s3.${AWS::URLSuffix}"
+                  BucketName = "${CacheBucket}"
+                  BucketLocation = "${AWS::Region}"
+
+                  [runners.custom]
+                  volumes = ["/cache", "/path/to-ca-cert-dir/ca.crt:/etc/gitlab-runner/certs/ca.crt:ro"]  ## confirm this ca cert path if needed, else remove line
+                  config_exec = "/opt/gitlab-runner/fargate"
+                  config_args = ["--config", "/etc/gitlab-runner/fargate.toml", "custom", "config"]
+                  prepare_exec = "/opt/gitlab-runner/fargate"
+                  prepare_args = ["--config", "/etc/gitlab-runner/fargate.toml", "custom", "prepare"]
+                  run_exec = "/opt/gitlab-runner/fargate"
+                  run_args = ["--config", "/etc/gitlab-runner/fargate.toml", "custom", "run"]
+                  cleanup_exec = "/opt/gitlab-runner/fargate"
+                  cleanup_args = ["--config", "/etc/gitlab-runner/fargate.toml", "custom", "cleanup"]
+            '/etc/rsyslog.d/25-gitlab-runner.conf':
+              owner: 'root'
+              group: 'root'
+              mode: '000644'
+              content: |
+                :programname, isequal, "gitlab-runner" /var/log/gitlab-runner.log
+
+          services:
+            sysvinit:
+              gitlab-runner:
+                ensureRunning: 'true'
+                enabled: 'true'
+                files: ['/etc/gitlab-runner/config.toml', '/etc/gitlab-runner/fargate.toml']
+              rsyslog:
+                ensureRunning: 'true'
+                enabled: 'true'
+                files: ['/etc/rsyslog.d/25-gitlab-runner.conf']
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: 'PT15M'
+    DependsOn:
+      - 'RunnersSecurityGroup'
+  ManagerEIP:
+    Type: 'AWS::EC2::EIP'
+    Properties:
+      Domain: 'vpc'
+      InstanceId: !Ref 'Manager'
+
+  ######################
+  ### GitLab Runners ###
+  ######################
+  RunnersRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'ec2.amazonaws.com'
+                - 'ecs-tasks.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+  RunnersInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Roles:
+        - !Ref 'RunnersRole'
+  RunnersSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !GetAtt InfrastructureStackInfo.VpcId
+      GroupName: !Sub '${AWS::StackName}-RunnersSecurityGroup'
+      GroupDescription: 'Security group for GitLab Runners.'
+      SecurityGroupIngress:
+        - Description: 'SSH traffic from Manager'
+          IpProtocol: 'tcp'
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref 'ManagerSecurityGroup'
+        - Description: 'Docker traffic from Manager'
+          IpProtocol: 'tcp'
+          FromPort: 2376
+          ToPort: 2376
+          SourceSecurityGroupId: !Ref 'ManagerSecurityGroup'
+  FargateManagerLaunchTemplate:
+    Type: 'AWS::EC2::LaunchTemplate'
+    Properties:
+      LaunchTemplateName: GitlabRunnerTemplate
+      LaunchTemplateData:
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: yes
+            DeleteOnTermination: yes
+            Groups:
+              -  !Ref ManagerSecurityGroup
+      ImageId: !Ref ManagerImageId
+      InstanceType: !Ref ManagerInstanceType
+      KeyName: !Ref ManagerKeyPair
+      UserData:
+        Fn::Base64: !Sub |
+          '#!/bin/bash -xe'
+          'apt-get update -y'
+          'apt-get install -y python-minimal  # Install Python (required for some AWS tools)'
+          'sudo mkdir -p /opt/gitlab-runner/{metadata,builds,cache}'
+          '# Install the files and packages from the metadata'
+          '/opt/aws/bin/cfn-init --stack '${AWS::StackName}' --region '${AWS::Region}' --resource Manager --configsets default'
+
+          '# Signal the status from cfn-init'
+          '/opt/aws/bin/cfn-signal -e $? --stack '${AWS::StackName}' --region '${AWS::Region}' --resource Manager'
+  FargateManagerAutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      LaunchTemplate: 
+        LaunchTemplateId: !Ref FargateManagerLaunchTemplate
+        Version: !GetAtt FargateManagerLaunchTemplate.LatestVersionNumber
+      MaxSize: '2' 
+      MinSize: '1' 
+      DesiredCapacity: !Ref RunnerDesiredCapacityEC2 
+      VPCZoneIdentifier:  
+        - !GetAtt InfrastructureStackInfo.PrivateSubnet1
+        - !GetAtt InfrastructureStackInfo.PrivateSubnet2
+
+  RunnersForEcsExecution:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ['-', [ !Ref 'AWS::StackName', GitlabECSExecutionRole]]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ecs-tasks.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    ## added IAM role for the autoscalling group for ecs
+  AutoscaleECSIAMPolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "AutoScaleECSCloudWatchPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action:
+              - "ecs:DescribeServices"
+              - "ecs:UpdateService"
+              - "cloudwatch:PutMetricAlarm"
+              - "cloudwatch:DescribeAlarms"
+              - "cloudwatch:DeleteAlarms"
+            Resource: "*"
+      Roles:
+        - Ref: ManagerRole
+ ## added IAM role for the autoscalling group for ecs
+  AutoscaleECSIAMRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "AutoscaleECSRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "ecs-tasks.amazonaws.com"
+            Action: "sts:AssumeRole"
+  ECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      Cluster: !Ref ECSCluster
+      DesiredCount: 1
+      LaunchType: FARGATE
+      ServiceName: !Join ['-', [ !Ref 'AWS::StackName', service]]
+      TaskDefinition: !Ref MyTaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !GetAtt InfrastructureStackInfo.PrivateSubnet1
+          SecurityGroups:
+            - !GetAtt RunnersSecurityGroup.GroupId
+      PlatformVersion: LATEST  #added the configuration for autoscaling
+      DeploymentConfiguration: 
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      DeploymentController:
+        Type: ECS
+      ServiceConnectConfiguration:
+        Enabled: false
+      Tags : []
+      EnableECSManagedTags: true
+  AutoScalingTarget:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    Properties: 
+      MaxCapacity: '4'
+      MinCapacity: '2'
+      ResourceId: !Ref ECSService
+      RoleARN: !GetAtt AutoscaleECSIAMRole.Arn
+      ScalableDimension: 'ecs:service:DesiredCount'
+      ServiceNamespace: ecs
+    DependsOn: 
+      - ECSService
+  AutoScalingPolicy:
+    Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+    Properties:
+      PolicyName: Test-policy
+      PolicyType: TargetTrackingScaling
+      ResourceId: service/MyEcsCluster/nginx-service
+      ScalingTargetId: !Ref AutoScalingTarget
+      TargetTrackingScalingPolicyConfiguration:
+        DisableScaleIn: false
+        TargetValue: '2'
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+  CloudwatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['-', [!Ref 'AWS::StackName', ECSLogGroup]]
+      RetentionInDays: 14
+      
+  MyTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${AWS::StackName}-gitlab-runner-fargate
+      Cpu: !Ref CPU
+      Memory: !Ref Memory
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt RunnersForEcsExecution.Arn
+      TaskRoleArn: !GetAtt RunnersRole.Arn
+      RequiresCompatibilities:
+        - FARGATE
+      ContainerDefinitions:
+        - Name: gitlab-runner  ## this is the container name running on ecs service
+          Image: 769796820311.dkr.ecr.ap-south-1.amazonaws.com/ci-coordinator:latest
+          PortMappings:
+            - ContainerPort: 22
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudwatchLogsGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: gitlab-runner-fargate
